@@ -13,15 +13,16 @@ export type DailyCount = {
   total: number
 }
 
-export function listActivity(db: DB): ActivityRow[] {
+export function listActivity(db: DB, limit: number, offset: number): ActivityRow[] {
   return db
     .prepare(
       `SELECT events.id, events.kind, events.detail, events.created_at, users.name AS user_name
        FROM events
        JOIN users ON users.id = events.user_id
-       ORDER BY events.created_at DESC`,
+       ORDER BY events.created_at DESC
+       LIMIT ? OFFSET ?`,
     )
-    .all() as ActivityRow[]
+    .all(limit, offset) as ActivityRow[]
 }
 
 export function countActivity(db: DB): number {

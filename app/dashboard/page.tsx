@@ -1,5 +1,5 @@
 import { cookies } from 'next/headers'
-import { redirect } from 'next/navigation'
+import { redirect, useSearchParams } from 'next/navigation'
 import { getDb } from '@/lib/db'
 import { readSession, SESSION_COOKIE } from '@/lib/auth/session'
 import { listActivity, countActivity, dailyCounts } from '@/lib/queries/activity'
@@ -13,13 +13,21 @@ function formatStamp(iso: string): string {
   return `${formatDay(iso.slice(0, 10))}, ${iso.slice(11, 16)}`
 }
 
-export default async function DashboardPage() {
+const ITEMS_PER_PAGE = 25
+
+export default async function DashboardPage({
+  searchParams,
+}: {
+  searchParams: { page?: string }
+}) {
   const store = await cookies()
   const userId = readSession(store.get(SESSION_COOKIE)?.value)
   if (!userId) redirect('/')
 
   const db = getDb()
-  const rows = listActivity(db)
+  const currentPage = Number(searchParams?.page) || 1
+  const offset = (currentPage - 1) * ITEMS_PER_PAGE
+  const rows = listActivity(db, ITEMS_PER_PAGE, offset)
   const total = countActivity(db)
   const daily = dailyCounts(db)
 
@@ -49,7 +57,28 @@ export default async function DashboardPage() {
       <section className="card overflow-hidden">
         <div className="flex items-baseline justify-between border-b border-hairline px-4 py-3">
           <h2 className="text-sm font-medium">Activity</h2>
-          <p className="num text-xs text-muted">{rows.length} rows</p>
+          <div className="flex items-center gap-2 text-sm">
+            {currentPage > 1 && (
+              <a
+                href={`/dashboard?page=${currentPage - 1}`}
+                className="text-brand-600 hover:underline"
+              >
+                Previous
+              </a>
+            )}
+            {currentPage < Math.ceil(total / ITEMS_PER_PAGE) && (
+              <a
+                href={`/dashboard?page=${currentPage + 1}`}
+                className="text-brand-600 hover:underline"
+              >
+                Next
+              </a>
+            )}
+          </div>
+          <h2 className="text-sm font-medium">Activity</h2>
+          <p className="num text-xs text-muted">
+            Page {currentPage} of {Math.ceil(total / ITEMS_PER_PAGE)}
+          </p>
         </div>
 
         <div className="overflow-x-auto px-4">
