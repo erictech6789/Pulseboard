@@ -30,6 +30,13 @@ export function verifyResetToken(db: DB, token: string, _now = new Date()): numb
   if (!row) return null
   if (row.used) return null
 
+  const issuedAt = new Date(row.created_at)
+  const oneHourLater = new Date(issuedAt.getTime() + 60 * 60 * 1000) // Add 1 hour in milliseconds
+
+  if (_now > oneHourLater) {
+    return null // Token expired
+  }
+
   return row.user_id
 }
 
