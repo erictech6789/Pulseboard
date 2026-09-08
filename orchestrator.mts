@@ -9,15 +9,16 @@
  *   npx tsx orchestrator.mts 2,4,9      # a subset
  *   npx tsx orchestrator.mts ls         # boxes from previous runs
  *   npx tsx orchestrator.mts pause  <box-id>
+ *   npx tsx orchestrator.mts rm     <box-id>
  *   npx tsx orchestrator.mts resume <box-id>
  *
- * .env: UPSTASH_BOX_API_KEY and REPO_URL are required. ANTHROPIC_API_KEY is
- * optional (falls back to the box's own LLM allowance) and GITHUB_TOKEN is
- * needed for private repos and for pushing branches back.
+ * .env: UPSTASH_BOX_API_KEY and REPO_URL are required, plus a key for whichever
+ * model MODEL names — OPENROUTER_API_KEY by default. GITHUB_TOKEN is only needed
+ * for private repos and for pushing branches back.
  */
 
 import { readFileSync } from "node:fs"
-import { Agent, Box, BoxApiKey, ClaudeCode, BoxError, type Snapshot } from "@upstash/box"
+import { Agent, Box, BoxApiKey, ClaudeCode, OpenRouterModel, BoxError, type Snapshot } from "@upstash/box"
 
 // Node reads .env itself — no dotenv needed.
 try {
@@ -29,15 +30,44 @@ try {
 const REPO_URL = required("REPO_URL")
 const GITHUB_TOKEN = process.env.GITHUB_TOKEN
 const BASE_BRANCH = process.env.BASE_BRANCH ?? "main"
-const MODEL = ClaudeCode.Opus_5
+/**
+ * The harness inside every box is Claude Code whatever this is set to — only the
+ * model behind it changes. Gemini 2.5 Flash through OpenRouter runs about $0.30
+ * per million in and $2.50 out, roughly a sixteenth of Opus 5, which is what
+ * makes ten agents overnight a few dollars rather than a few tens.
+ */
+const MODEL = process.env.MODEL ?? OpenRouterModel.Gemini_2_5_Flash
 
 /**
- * The key the agent inside the box talks to Anthropic with. Your own key if you
- * have one; otherwise the LLM allowance Upstash ships with the box, which is
- * capped ($1/mo free, $100/mo pay-as-you-go) — fine for one test run, not for
- * ten agents working overnight.
+ * The key the agent uses to reach its model, picked from the model id: an
+ * openrouter/* model wants OPENROUTER_API_KEY, a vercel/* one wants
+ * AI_GATEWAY_API_KEY, anything else falls back to ANTHROPIC_API_KEY.
+ * UPSTASH_LLM=1 overrides all of it and spends the allowance that ships with the
+ * box instead — $1/month on the free plan, $100/month on pay-as-you-go.
  */
-const AGENT_KEY = process.env.ANTHROPIC_API_KEY || BoxApiKey.UpstashKey
+function agentKey(): { key: BoxApiKey | string; source: string } {
+  const allowance = { key: BoxApiKey.UpstashKey, source: "the box's own LLM allowance" }
+  if (process.env.UPSTASH_LLM === "1") return allowance
+  if (MODEL.startsWith("openrouter/"))
+    return { key: required("OPENROUTER_API_KEY"), source: "your OpenRouter credit" }
+  if (MODEL.startsWith("vercel/"))
+    return { key: required("AI_GATEWAY_API_KEY"), source: "your Vercel AI Gateway key" }
+  if (process.env.ANTHROPIC_API_KEY)
+    return { key: process.env.ANTHROPIC_API_KEY, source: "your Anthropic key" }
+  return allowance
+}
+
+/**
+ * Spend controls. BUDGET is a hard per-agent ceiling the box enforces, so ten
+ * agents can never cost more than ten times it — that number is the only
+ * guarantee here, everything else is an estimate. EFFORT is the bigger lever on
+ * what they actually spend: "high" explores more before acting, "medium" scopes
+ * itself to the task. An agent that hits its budget stops mid-task and shows up
+ * in the morning report with no commit.
+ */
+const BUDGET = Number(process.env.BUDGET ?? 3)
+const EFFORT = (process.env.EFFORT ?? "high") as "low" | "medium" | "high" | "max"
+const MAX_TURNS = Number(process.env.MAX_TURNS ?? 60)
 
 /** Folder the repo gets cloned into, under the box's default cwd. */
 const FOLDER = "pulseboard"
@@ -58,6 +88,8 @@ const networkPolicy = process.env.LOCK_NETWORK === "1"
         "github.com",
         "codeload.github.com",
         "objects.githubusercontent.com",
+        "openrouter.ai",
+        "ai-gateway.vercel.sh",
         "api.anthropic.com",
       ],
     }
@@ -127,14 +159,15 @@ Rules:
 
 // -------------------------------------------------------------------- box ---
 
-const boxDefaults = {
+/** A function, not a constant, so `items` and `ls` never ask for a model key. */
+const boxDefaults = () => ({
   runtime: "node" as const,
   size: "small" as const,
   labels: ["pulseboard"],
   agent: {
     harness: Agent.ClaudeCode,
     model: MODEL,
-    apiKey: AGENT_KEY,
+    apiKey: agentKey().key,
   },
   git: {
     token: GITHUB_TOKEN,
@@ -146,7 +179,7 @@ const boxDefaults = {
     DATABASE_PATH: process.env.DATABASE_PATH ?? "./data/app.db",
   },
   networkPolicy,
-}
+})
 
 /**
  * One box, repo cloned, dependencies installed, database seeded.
@@ -154,16 +187,24 @@ const boxDefaults = {
  * as Claude Code's options rather than a bag of unknowns.
  */
 async function createReadyBox(name: string) {
-  const box = await Box.create<Agent.ClaudeCode>({ ...boxDefaults, name })
+  const box = await Box.create<Agent.ClaudeCode>({ ...boxDefaults(), name })
   log(name, `box ${box.id} created`)
 
-  await box.git.clone({ repo: REPO_URL, branch: BASE_BRANCH, folder: FOLDER })
-  await box.cd(FOLDER)
-  log(name, "repo cloned, installing")
+  try {
+    await box.git.clone({ repo: REPO_URL, branch: BASE_BRANCH, folder: FOLDER })
+    await box.cd(FOLDER)
+    log(name, "repo cloned, installing")
 
-  await run(box, "npm install")
-  await run(box, "npm run seed")
-  log(name, "ready")
+    await run(box, "npm install")
+    await run(box, "npm run seed")
+    log(name, "ready")
+  } catch (error) {
+    // Setup failed, so nothing in this box is worth keeping — and a box left
+    // behind still holds one of the ten concurrent slots.
+    await box.delete().catch(() => {})
+    log(name, `setup failed, deleted ${box.id}`)
+    throw error
+  }
 
   return box
 }
@@ -171,7 +212,7 @@ async function createReadyBox(name: string) {
 /** Same thing, but restored from a snapshot — no clone, no npm install. */
 async function boxFromSnapshot(snapshot: Snapshot, name: string) {
   const box = await Box.fromSnapshot<Agent.ClaudeCode>(snapshot.id, {
-    ...boxDefaults,
+    ...boxDefaults(),
     name,
   })
   await box.cd(FOLDER)
@@ -193,20 +234,48 @@ type Report = {
   item: BacklogItem
   boxId: string
   committed: boolean
-  testsPass: boolean
+  broke: string[]
+  fixed: string[]
   suspicious: boolean
   diffstat: string
   costUsd: number
   error?: string
 }
 
-async function work(box: Box<Agent.ClaudeCode>, item: BacklogItem): Promise<Report> {
+/**
+ * Names of the tests failing right now. Two are already red on main (items 9
+ * and 10 ship with the failing test they are meant to fix), so a plain
+ * pass/fail on a branch would report every other agent as broken.
+ */
+async function failingTests(box: Box): Promise<string[]> {
+  const result = await box.exec.command("npx vitest run --reporter=json")
+  const json = result.stdout.slice(result.stdout.indexOf("{"))
+  try {
+    const report = JSON.parse(json) as {
+      testResults: { assertionResults: { fullName: string; status: string }[] }[]
+    }
+    return report.testResults.flatMap((file) =>
+      file.assertionResults
+        .filter((test) => test.status === "failed")
+        .map((test) => test.fullName),
+    )
+  } catch {
+    return ["<could not read the test report>"]
+  }
+}
+
+async function work(
+  box: Box<Agent.ClaudeCode>,
+  item: BacklogItem,
+  baseline: string[],
+): Promise<Report> {
   const tag = `${item.number}`
   const report: Report = {
     item,
     boxId: box.id,
     committed: false,
-    testsPass: false,
+    broke: [],
+    fixed: [],
     suspicious: false,
     diffstat: "",
     costUsd: 0,
@@ -222,9 +291,9 @@ async function work(box: Box<Agent.ClaudeCode>, item: BacklogItem): Promise<Repo
       prompt: buildPrompt(item),
       timeout: 60 * 60 * 1000,
       options: {
-        maxTurns: 60,
-        maxBudgetUsd: 3,
-        effort: "high",
+        maxTurns: MAX_TURNS,
+        maxBudgetUsd: BUDGET,
+        effort: EFFORT,
       },
       onToolUse: (tool) => log(tag, `→ ${tool.name}`),
     })
@@ -251,8 +320,10 @@ async function work(box: Box<Agent.ClaudeCode>, item: BacklogItem): Promise<Repo
       .filter(Boolean)
       .some((line) => Number(line.split("\t")[1]) > 0)
 
-    const verify = await box.exec.command("npm test")
-    report.testsPass = verify.exitCode === 0
+    // Only what this branch changed: tests it broke, tests it repaired.
+    const failing = await failingTests(box)
+    report.broke = failing.filter((name) => !baseline.includes(name))
+    report.fixed = baseline.filter((name) => !failing.includes(name))
 
     if (PUSH && report.committed) {
       await box.git.push({ branch: item.branch })
@@ -281,6 +352,7 @@ async function main() {
   if (command === "items") return printBacklog()
   if (command === "ls") return listBoxes()
   if (command === "pause") return (await Box.get(argument)).pause()
+  if (command === "rm") return (await Box.get(argument)).delete()
   if (command === "resume") return resumeBox(argument)
 
   const all = parseBacklog()
@@ -291,30 +363,43 @@ async function main() {
 
   if (items.length === 0) throw new Error(`no backlog items matched "${command}"`)
 
-  console.log(`repo   ${REPO_URL} @ ${BASE_BRANCH}`)
-  console.log(`model  ${MODEL} via ${AGENT_KEY === BoxApiKey.UpstashKey ? "the box's own LLM allowance" : "your Anthropic key"}`)
-  console.log(`push   ${PUSH ? "on" : "off (branches stay in the box)"}\n`)
+  // The repo URL and model id are the two things you don't want on a recording,
+  // so they only print with VERBOSE=1.
+  if (process.env.VERBOSE === "1") {
+    console.log(`repo   ${REPO_URL} @ ${BASE_BRANCH}`)
+    console.log(`model  ${MODEL} via ${agentKey().source}`)
+  }
+  console.log(`push   ${PUSH ? "on" : "off (branches stay in the box)"}`)
+  console.log(
+    `spend  effort ${EFFORT}, $${BUDGET.toFixed(2)} cap per agent ` +
+      `— $${(BUDGET * items.length).toFixed(2)} worst case for ${items.length}\n`,
+  )
 
   let reports: Report[]
 
+  const first = items[0]
+  const base = await createReadyBox(`pulseboard-${first.number}`)
+
+  // What is already red before any agent touches anything.
+  const baseline = await failingTests(base)
+  console.log(`baseline: ${baseline.length} failing test(s) on ${BASE_BRANCH}`)
+  for (const name of baseline) console.log(`  ${name}`)
+  console.log()
+
   if (items.length === 1) {
     // One item, one box. No point building a snapshot for a single run.
-    const box = await createReadyBox(`pulseboard-${items[0].number}`)
-    reports = [await work(box, items[0])]
+    reports = [await work(base, first, baseline)]
   } else {
     // Clone and npm install once, snapshot the result, and start every other
     // box from that image. Otherwise you pay for the same install ten times.
-    console.log(`${items.length} items. Building the base image first.\n`)
-    const first = items[0]
-    const base = await createReadyBox(`pulseboard-${first.number}`)
     const snapshot = await base.snapshot({ name: `pulseboard-${BASE_BRANCH}` })
     console.log(`snapshot ${snapshot.id} ready — starting ${items.length} agents\n`)
 
     reports = await Promise.all([
-      work(base, first),
+      work(base, first, baseline),
       ...items.slice(1).map(async (item) => {
         const box = await boxFromSnapshot(snapshot, `pulseboard-${item.number}`)
-        return work(box, item)
+        return work(box, item, baseline)
       }),
     ])
   }
@@ -330,15 +415,17 @@ function summarize(reports: Report[]) {
       : !report.committed
         ? "no commit"
         : report.suspicious
-          ? "REVIEW — deleted test lines"
-          : report.testsPass
-            ? "ok"
-            : "tests failing"
+          ? "REVIEW — removed test lines"
+          : report.broke.length > 0
+            ? `broke ${report.broke.length} test(s)`
+            : "ok"
 
     console.log(
       `${report.item.branch.padEnd(34)} ${state.padEnd(28)} ` +
         `$${report.costUsd.toFixed(2).padStart(5)}  ${report.boxId}`,
     )
+    for (const name of report.fixed) console.log(`    fixed  ${name}`)
+    for (const name of report.broke) console.log(`    BROKE  ${name}`)
     if (report.diffstat) {
       console.log(report.diffstat.split("\n").map((l) => `    ${l}`).join("\n"))
     }
@@ -355,9 +442,22 @@ function printBacklog() {
 }
 
 async function listBoxes() {
-  for (const box of await Box.list({ label: "pulseboard" })) {
+  // Every box counts against the concurrency limit — 10 on the free plan, which
+  // is exactly what a full run needs. One box left over from a rehearsal and the
+  // tenth create fails. Delete the strays before you shoot.
+  const boxes = await Box.list()
+  const mine = boxes.filter((box) => box.labels?.includes("pulseboard"))
+
+  for (const box of mine) {
     console.log(`${box.id}  ${(box.name ?? "").padEnd(20)} ${box.status}`)
   }
+
+  const others = boxes.length - mine.length
+  console.log(
+    `\n${boxes.length} box(es) on the account` +
+      (others > 0 ? ` (${others} outside this project)` : "") +
+      ` — a full run needs ${parseBacklog().length} slots.`,
+  )
 }
 
 async function resumeBox(boxId: string) {

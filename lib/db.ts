@@ -1,4 +1,5 @@
 import Database from 'better-sqlite3'
+import fs from 'node:fs'
 import path from 'node:path'
 
 export type DB = Database.Database
@@ -53,6 +54,9 @@ let cached: DB | null = null
 export function getDb(): DB {
   if (!cached) {
     const file = process.env.DATABASE_PATH ?? path.join(process.cwd(), 'data', 'app.db')
+    // data/ is gitignored, so a fresh clone doesn't have it and better-sqlite3
+    // refuses to create the file. Make the directory before opening.
+    fs.mkdirSync(path.dirname(file), { recursive: true })
     cached = applySchema(new Database(file))
   }
   return cached
