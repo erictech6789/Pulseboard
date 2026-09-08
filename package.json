@@ -7,9 +7,11 @@
     "build": "next build",
     "start": "next start",
     "seed": "tsx scripts/seed.ts",
-    "test": "vitest run"
+    "test": "vitest run",
+    "agents": "tsx orchestrator.mts"
   },
   "dependencies": {
+    "@upstash/box": "^0.7.3",
     "better-sqlite3": "^11.5.0",
     "next": "^16.3.4",
     "react": "^19.0.0",
