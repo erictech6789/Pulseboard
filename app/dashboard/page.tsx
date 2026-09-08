@@ -53,28 +53,35 @@ export default async function DashboardPage() {
         </div>
 
         <div className="overflow-x-auto px-4">
-          <table className="w-full border-collapse">
-            <thead>
-              <tr className="border-b border-hairline">
-                <th className="th w-40">When</th>
-                <th className="th w-48">User</th>
-                <th className="th w-52">Event</th>
-                <th className="th">Detail</th>
-              </tr>
-            </thead>
-            <tbody>
-              {rows.map((row) => (
-                <tr key={row.id} className="border-b border-hairline/70 transition hover:bg-plane">
-                  <td className="td num whitespace-nowrap text-muted">{formatStamp(row.created_at)}</td>
-                  <td className="td whitespace-nowrap">{row.user_name}</td>
-                  <td className="td">
-                    <Badge>{row.kind}</Badge>
-                  </td>
-                  <td className="td text-ink2">{row.detail}</td>
+          {rows.length === 0 ? (
+            <ErrorState
+              title="No activity yet"
+              description="Once your team starts using Pulseboard, their activity will appear here."
+            />
+          ) : (
+            <table className="w-full border-collapse">
+              <thead>
+                <tr className="border-b border-hairline">
+                  <th className="th w-40">When</th>
+                  <th className="th w-48">User</th>
+                  <th className="th w-52">Event</th>
+                  <th className="th">Detail</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {rows.map((row) => (
+                  <tr key={row.id} className="border-b border-hairline/70 transition hover:bg-plane">
+                    <td className="td num whitespace-nowrap text-muted">{formatStamp(row.created_at)}</td>
+                    <td className="td whitespace-nowrap">{row.user_name}</td>
+                    <td className="td">
+                      <Badge>{row.kind}</Badge>
+                    </td>
+                    <td className="td text-ink2">{row.detail}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
         </div>
       </section>
     </div>
