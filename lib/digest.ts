@@ -1,4 +1,5 @@
 import type { DB } from '@/lib/db'
+import { DateTimeFormatOptions } from 'intl-toolkit'
 
 export type DigestUser = {
   id: number
@@ -20,7 +21,10 @@ export function usersDueForDigest(db: DB, now: Date): DigestUser[] {
     .prepare(`SELECT id, name, email, timezone FROM users ORDER BY id`)
     .all() as DigestUser[]
 
-  return users.filter(() => now.getHours() === DIGEST_HOUR)
+  return users.filter((user) => {
+    const userLocalTime = new Date(now.toLocaleString('en-US', { timeZone: user.timezone }))
+    return userLocalTime.getHours() === DIGEST_HOUR
+  })
 }
 
 export function digestSubject(now: Date): string {
