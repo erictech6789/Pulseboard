@@ -2,6 +2,34 @@
 @tailwind components;
 @tailwind utilities;
 
+:root {
+  color-scheme: light;
+}
+
 body {
-  @apply bg-slate-50 text-ink antialiased;
+  @apply bg-plane text-ink antialiased;
+}
+
+@layer components {
+  .card {
+    @apply rounded-xl border border-hairline bg-surface shadow-card;
+  }
+
+  .field {
+    @apply w-full rounded-lg border border-hairline bg-surface px-3 py-2 text-sm
+           outline-none transition placeholder:text-muted
+           focus:border-accent focus:ring-2 focus:ring-accent/20;
+  }
+
+  .th {
+    @apply py-2.5 text-left text-xs font-medium uppercase tracking-wider text-muted;
+  }
+
+  .td {
+    @apply py-3 align-middle text-sm;
+  }
+
+  .num {
+    font-variant-numeric: tabular-nums;
+  }
 }

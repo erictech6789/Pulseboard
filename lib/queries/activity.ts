@@ -8,6 +8,11 @@ export type ActivityRow = {
   user_name: string
 }
 
+export type DailyCount = {
+  day: string
+  total: number
+}
+
 export function listActivity(db: DB): ActivityRow[] {
   return db
     .prepare(
@@ -22,4 +27,15 @@ export function listActivity(db: DB): ActivityRow[] {
 export function countActivity(db: DB): number {
   const row = db.prepare(`SELECT COUNT(*) AS total FROM events`).get() as { total: number }
   return row.total
+}
+
+export function dailyCounts(db: DB): DailyCount[] {
+  return db
+    .prepare(
+      `SELECT substr(created_at, 1, 10) AS day, COUNT(*) AS total
+       FROM events
+       GROUP BY day
+       ORDER BY day`,
+    )
+    .all() as DailyCount[]
 }

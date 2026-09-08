@@ -52,26 +52,56 @@ function main() {
 
   const zones = ['UTC', 'Europe/Berlin', 'America/New_York', 'Asia/Tokyo', 'Australia/Sydney']
 
-  for (let i = 0; i < 23; i++) {
-    const name = `${pick(FIRST)} ${pick(LAST)}`
-    const email = `${name.toLowerCase().replace(/[^a-z]/g, '.')}${i}@pulseboard.dev`
-    const created = new Date(Date.UTC(2026, 0, 5 + (i % 60), 8, 0, 0)).toISOString()
+  // Every first/last pairing, shuffled, so no two seeded people share a name.
+  const combos: string[] = []
+  for (const first of FIRST) for (const last of LAST) combos.push(`${first} ${last}`)
 
-    userIds.push(
-      Number(insertUser.run(name, email, demoHash, pick(teamIds), pick(zones), created).lastInsertRowid),
-    )
+  for (let i = combos.length - 1; i > 0; i--) {
+    const j = Math.floor(random() * (i + 1))
+    ;[combos[i], combos[j]] = [combos[j], combos[i]]
   }
+
+  combos
+    .filter((name) => name !== 'Ada Okafor')
+    .slice(0, 23)
+    .forEach((name, i) => {
+      const email = `${name.toLowerCase().replace(' ', '.')}@pulseboard.dev`
+      const created = new Date(Date.UTC(2026, 0, 5 + (i % 60), 8, 0, 0)).toISOString()
+
+      userIds.push(
+        Number(
+          insertUser.run(name, email, demoHash, pick(teamIds), pick(zones), created).lastInsertRowid,
+        ),
+      )
+    })
 
   const insertEvent = db.prepare(
     `INSERT INTO events (user_id, kind, detail, created_at) VALUES (?, ?, ?, ?)`,
   )
 
-  for (let i = 0; i < 480; i++) {
-    const at = new Date(Date.UTC(2026, 7, 1 + (i % 38), 6 + (i % 12), (i * 7) % 60, 0))
-    insertEvent.run(pick(userIds), pick(KINDS), `seq ${i + 1}`, at.toISOString())
+  const START = Date.UTC(2026, 7, 1)
+  const DAYS = 38
+  let seq = 0
+
+  for (let day = 0; day < DAYS; day++) {
+    const date = new Date(START + day * 86_400_000)
+    const weekend = date.getUTCDay() === 0 || date.getUTCDay() === 6
+
+    // Weekdays are busy, weekends are quiet, and the team is growing slowly.
+    const base = weekend ? 4 : 14
+    const growth = Math.round((day / DAYS) * 6)
+    const noise = Math.round(random() * 5) - 2
+    const count = Math.max(1, base + growth + noise)
+
+    for (let n = 0; n < count; n++) {
+      const at = new Date(
+        date.getTime() + (8 + (n % 10)) * 3_600_000 + ((n * 17) % 60) * 60_000,
+      )
+      insertEvent.run(pick(userIds), pick(KINDS), `seq ${++seq}`, at.toISOString())
+    }
   }
 
-  console.log(`Seeded ${TEAMS.length} teams, ${userIds.length} users, 480 events.`)
+  console.log(`Seeded ${TEAMS.length} teams, ${userIds.length} users, ${seq} events.`)
   console.log('Sign in with ada@pulseboard.dev / password123')
 }
 
